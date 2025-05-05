@@ -2,7 +2,7 @@
 
 A lightweight, always-on-top ping monitor for Windows that shows your network latency in real-time. Perfect for gamers, streamers, or anyone who needs to monitor their network connection without opening a command prompt.
 
-![Ping Overlay Screenshot](screenshot.png)
+![Ping Overlay Screenshot](assets/screenshot.png)
 
 ## Features
 
@@ -92,7 +92,7 @@ Contributions are welcome! Feel free to:
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the [MIT License](LICENSE).
 
 ## Acknowledgments
 
