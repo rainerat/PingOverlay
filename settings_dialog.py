@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QSpinBox, QCheckBox, QPushButton, QMessageBox
 from PyQt6.QtGui import QIcon
 import os
+import sys
 
 DEFAULT_HOST = "google.com"
 
@@ -9,7 +10,13 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Ping Overlay Settings")
         # Set custom window icon
-        icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
+        if getattr(sys, 'frozen', False):
+            # Running as executable
+            icon_path = os.path.join(sys._MEIPASS, 'icon.ico')
+        else:
+            # Running as script
+            icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
+        
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         self.settings = settings

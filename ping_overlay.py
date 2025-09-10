@@ -182,7 +182,25 @@ class TrayApp:
         self.app = app
         self.settings = settings
         self.overlay = PingOverlay(settings, tray_app=self)
-        self.tray = QSystemTrayIcon(QIcon(os.path.join(os.path.dirname(__file__), 'icon.ico')))
+        # Handle icon path for both script and executable
+        if getattr(sys, 'frozen', False):
+            # Running as executable
+            icon_path = os.path.join(sys._MEIPASS, 'icon.ico')
+        else:
+            # Running as script
+            icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
+        
+        if os.path.exists(icon_path):
+            self.tray = QSystemTrayIcon(QIcon(icon_path))
+        else:
+            # Fallback to default icon if custom icon not found
+            self.tray = QSystemTrayIcon()
+        
+        # Check if system tray is available
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            print("System tray is not available!")
+            return
+        
         self.tray.setToolTip('Ping Overlay')
         self.menu = QMenu()
 
@@ -206,6 +224,8 @@ class TrayApp:
         self.exit_action = QAction('Exit')
         self.menu.addAction(self.exit_action)
         self.tray.setContextMenu(self.menu)
+        
+        # Show the tray icon
         self.tray.show()
 
         # Connect tray actions
@@ -269,7 +289,13 @@ class TrayApp:
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     # Set global application icon
-    icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
+    if getattr(sys, 'frozen', False):
+        # Running as executable
+        icon_path = os.path.join(sys._MEIPASS, 'icon.ico')
+    else:
+        # Running as script
+        icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
+    
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
     app.setQuitOnLastWindowClosed(False)
