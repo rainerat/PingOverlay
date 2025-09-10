@@ -1,0 +1,7 @@
+{
+    "host": "google.com",
+    "green_threshold": 50,
+    "yellow_threshold": 100,
+    "show_settings_on_startup": true,
+    "click_through": false
+}
