@@ -22,3 +22,5 @@ venv/
 Thumbs.db
 ehthumbs.db
 Desktop.ini 
+# User settings (generated at runtime)
+settings.json
