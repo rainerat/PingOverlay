@@ -1,10 +1,12 @@
 import sys
 import os
+import time
+import ctypes
 import traceback  # Only for error handling, not debug
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QMenu, QSizePolicy, QSystemTrayIcon, QDialog
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QIcon
 import ping3
 from settings import Settings
@@ -13,6 +15,57 @@ from settings_dialog import SettingsDialog
 # Constants
 CORNER_MARGIN = 5
 POSITIONS = ["Top Left", "Top Right", "Bottom Left", "Bottom Right"]
+PING_INTERVAL_MS = 1000
+TOPMOST_INTERVAL_MS = 1000
+PING_ERROR = "error"  # Sentinel emitted when ping3 raises
+
+# Win32 constants for re-asserting always-on-top
+HWND_TOPMOST = -1
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+
+if sys.platform == "win32":
+    from ctypes import wintypes
+    SetWindowPos = ctypes.windll.user32.SetWindowPos
+    # Declare pointer-sized handles; otherwise ctypes passes HWND_TOPMOST (-1) as a
+    # 32-bit int and 64-bit Windows doesn't recognise it.
+    SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    SetWindowPos.restype = wintypes.BOOL
+
+LABEL_STYLE = """
+    QLabel {{
+        color: {color};
+        background-color: rgba(0, 0, 0, 150);
+        padding: 3px 8px;
+        border-radius: 5px;
+    }}
+"""
+
+class PingThread(QThread):
+    """Pings the configured host in the background so slow pings never block the UI."""
+    result = pyqtSignal(object)  # seconds (float), None/False on timeout, or PING_ERROR
+
+    def __init__(self, settings):
+        super().__init__()
+        self.settings = settings
+
+    def run(self):
+        while not self.isInterruptionRequested():
+            started = time.monotonic()
+            host = self.settings.data.get("host", "google.com")
+            try:
+                value = ping3.ping(host)
+            except Exception:
+                value = PING_ERROR
+            self.result.emit(value)
+            # Wait out the rest of the interval, staying responsive to stop requests
+            remaining_ms = PING_INTERVAL_MS - int((time.monotonic() - started) * 1000)
+            while remaining_ms > 0 and not self.isInterruptionRequested():
+                step = min(remaining_ms, 100)
+                self.msleep(step)
+                remaining_ms -= step
 
 class PingOverlay(QMainWindow):
     """The always-on-top overlay window displaying the current ping."""
@@ -27,14 +80,8 @@ class PingOverlay(QMainWindow):
 
         # Ping label setup
         self.ping_label = QLabel("-- ms")
-        self.ping_label.setStyleSheet("""
-            QLabel {
-                color: #00ff00;
-                background-color: rgba(0, 0, 0, 150);
-                padding: 3px 8px;
-                border-radius: 5px;
-            }
-        """)
+        self.current_color = None
+        self.set_label_color("#00ff00")
         font = QFont()
         font.setPointSize(10)
         self.ping_label.setFont(font)
@@ -48,10 +95,11 @@ class PingOverlay(QMainWindow):
         # Set initial position
         self.move_to_position(POSITIONS[0])
 
-        # Setup ping timer
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_ping)
-        self.timer.start(1000)  # Update every second
+        # Other apps (fullscreen apps, games, the taskbar) can push this window out of
+        # the topmost band; Qt only sets it once, so periodically re-assert it.
+        self.topmost_timer = QTimer()
+        self.topmost_timer.timeout.connect(self.reassert_topmost)
+        self.topmost_timer.start(TOPMOST_INTERVAL_MS)
 
         # Make window draggable
         self.old_pos = None
@@ -119,51 +167,45 @@ class PingOverlay(QMainWindow):
         elif position == "Bottom Right":
             self.move(screen.width() - self.width() - CORNER_MARGIN, screen.height() - self.height() - CORNER_MARGIN)
 
-    def update_ping(self):
-        host = self.settings.data.get("host", "google.com")
-        try:
-            ping_time = ping3.ping(host)
-            if ping_time is not None and ping_time > 0:
-                ping_time_ms = ping_time * 1000
-                self.ping_label.setText(f"{ping_time_ms:.0f} ms")
-                # Use thresholds from settings
-                green = self.settings.data.get("green_threshold", 50)
-                yellow = self.settings.data.get("yellow_threshold", 100)
-                if ping_time_ms < green:
-                    color = "#00ff00"  # Green
-                elif ping_time_ms < yellow:
-                    color = "#ffff00"  # Yellow
-                else:
-                    color = "#ff0000"  # Red
-                self.ping_label.setStyleSheet(f"""
-                    QLabel {{
-                        color: {color};
-                        background-color: rgba(0, 0, 0, 150);
-                        padding: 3px 8px;
-                        border-radius: 5px;
-                    }}
-                """)
+    def reassert_topmost(self):
+        if sys.platform != "win32" or not self.isVisible():
+            return
+        # Don't jump over our own open menus (overlay right-click or tray menu)
+        if QApplication.activePopupWidget() is not None:
+            return
+        SetWindowPos(
+            int(self.winId()), HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+        )
+
+    def set_label_color(self, color):
+        # Restyling re-polishes the widget, so only do it when the color changes
+        if color != self.current_color:
+            self.current_color = color
+            self.ping_label.setStyleSheet(LABEL_STYLE.format(color=color))
+
+    def show_ping(self, ping_time):
+        """Display a result from PingThread."""
+        if ping_time == PING_ERROR:
+            text, color = "Error", "#ff0000"
+        elif ping_time is not None and ping_time > 0:
+            ping_time_ms = ping_time * 1000
+            text = f"{ping_time_ms:.0f} ms"
+            # Use thresholds from settings
+            green = self.settings.data.get("green_threshold", 50)
+            yellow = self.settings.data.get("yellow_threshold", 100)
+            if ping_time_ms < green:
+                color = "#00ff00"  # Green
+            elif ping_time_ms < yellow:
+                color = "#ffff00"  # Yellow
             else:
-                self.ping_label.setText("Timeout")
-                self.ping_label.setStyleSheet("""
-                    QLabel {
-                        color: #ff0000;
-                        background-color: rgba(0, 0, 0, 150);
-                        padding: 3px 8px;
-                        border-radius: 5px;
-                    }
-                """)
-        except Exception:
-            self.ping_label.setText("Error")
-            self.ping_label.setStyleSheet("""
-                QLabel {
-                    color: #ff0000;
-                    background-color: rgba(0, 0, 0, 150);
-                    padding: 3px 8px;
-                    border-radius: 5px;
-                }
-            """)
-        self.adjust_overlay_size()
+                color = "#ff0000"  # Red
+        else:
+            text, color = "Timeout", "#ff0000"
+        self.set_label_color(color)
+        if text != self.ping_label.text():
+            self.ping_label.setText(text)
+            self.adjust_overlay_size()
 
     def closeEvent(self, event):
         """Only allow closing if allow_close is True, otherwise just hide."""
@@ -172,7 +214,7 @@ class PingOverlay(QMainWindow):
         else:
             event.ignore()
             if self.tray_app:
-                self.tray_app.hide_overlay(from_overlay=True)
+                self.tray_app.hide_overlay()
             else:
                 self.hide()
 
@@ -182,6 +224,13 @@ class TrayApp:
         self.app = app
         self.settings = settings
         self.overlay = PingOverlay(settings, tray_app=self)
+
+        # One ping thread for the app's lifetime; it reads the host from settings
+        # each cycle, so it survives the overlay being recreated.
+        self.ping_thread = PingThread(self.settings)
+        self.ping_thread.result.connect(self.on_ping_result)
+        self.ping_thread.start()
+
         # Handle icon path for both script and executable
         if getattr(sys, 'frozen', False):
             # Running as executable
@@ -236,10 +285,12 @@ class TrayApp:
         self.tray.activated.connect(self.on_tray_activated)
         self.recreating_overlay = False
 
+    def on_ping_result(self, ping_time):
+        self.overlay.show_ping(ping_time)
+
     def show_overlay(self):
         self.overlay.show()
-        self.overlay.raise_()
-        self.overlay.activateWindow()
+        self.overlay.raise_()  # Not activateWindow(): don't steal focus from a game
         self.show_overlay_action.setChecked(True)
 
     def hide_overlay(self):
